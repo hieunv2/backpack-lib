@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+// use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_compact::{KeyPair, Noise, PublicKey, SecretKey, Seed, Signature};
 pub use error::{Error, Result};
 use reqwest::{header::CONTENT_TYPE, IntoUrl, Method, Request, Response, StatusCode};
 use serde::Serialize;
@@ -19,8 +20,8 @@ const SIGNING_WINDOW: u32 = 5000;
 
 #[derive(Debug, Clone)]
 pub struct BpxClient {
-    pub verifier: VerifyingKey,
-    signer: SigningKey,
+    pub verifier: PublicKey,
+    signer: SecretKey,
     base_url: String,
     pub client: reqwest::Client,
 }
@@ -64,20 +65,21 @@ impl BpxClient {
     ) -> Result<Self> {
         let mut headers = headers.unwrap_or_default();
         headers.insert("X-API-Key", api_key.parse()?);
-        headers.insert(CONTENT_TYPE, "application/json; charset=utf-8".parse()?);
+
+        let api_secret: Vec<u8> = STANDARD
+            .decode(api_secret)?
+            .try_into()
+            .map_err(|_| Error::SecretKey)?;
+
+        let api_secret: [u8; 32] = api_secret.try_into().unwrap(); // Convert Vec<u8> to [u8; 32]
+        let keypair = KeyPair::from_seed(Seed::from(api_secret));
+        let signer = keypair.sk;
+        let verifier = keypair.pk;
 
         let client = reqwest::Client::builder()
             .user_agent("bpx-rust-client")
             .default_headers(headers)
             .build()?;
-
-        let api_secret = STANDARD
-            .decode(api_secret)?
-            .try_into()
-            .map_err(|_| Error::SecretKey)?;
-
-        let signer = SigningKey::from_bytes(&api_secret);
-        let verifier = signer.verifying_key();
 
         Ok(BpxClient {
             verifier,
@@ -133,8 +135,10 @@ impl BpxClient {
         signee.push_str(&format!("&timestamp={timestamp}&window={SIGNING_WINDOW}"));
         tracing::debug!("signee: {}", signee);
 
-        let signature: Signature = self.signer.sign(signee.as_bytes());
-        let signature = STANDARD.encode(signature.to_bytes());
+        let signature: Signature = self.signer.sign(signee.as_bytes(), Some(Noise::generate()));
+        let signature = STANDARD.encode(signature.as_ref());
+        println!("signature: {}", signature);
+        println!("self.signer: {:?}", self.signer);
 
         req.headers_mut()
             .insert("X-Timestamp", timestamp.to_string().parse()?);
